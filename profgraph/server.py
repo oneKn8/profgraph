@@ -899,9 +899,21 @@ async def get_intel(
 
 def main():
     transport = os.environ.get("PROFGRAPH_TRANSPORT", "stdio")
-    if transport not in ("stdio", "streamable-http"):
-        transport = "stdio"
-    mcp.run(transport=transport)
+    if transport == "streamable-http":
+        # Extend MCP's Starlette app with REST API routes
+        import uvicorn
+        from .api import routes as api_routes
+
+        mcp_app = mcp.streamable_http_app()
+        # Add REST routes to the MCP app so lifespan is shared
+        for route in api_routes:
+            mcp_app.routes.append(route)
+
+        port = int(os.environ.get("PROFGRAPH_PORT", "8000"))
+        host = os.environ.get("PROFGRAPH_HOST", "0.0.0.0")
+        uvicorn.run(mcp_app, host=host, port=port)
+    else:
+        mcp.run(transport="stdio")
 
 
 if __name__ == "__main__":
