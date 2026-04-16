@@ -511,18 +511,24 @@ async def recommend_professor(
     university: str,
     course: str,
     professors: list[str],
+    learning_style: str | None = None,
     priorities: list[str] | None = None,
 ) -> str:
     """Rank professors for a course based on teaching style and student priorities.
 
     Scores each professor on grade outcomes, teaching quality, and how well
-    they match the student's priorities. Returns a ranked recommendation
-    with explanations.
+    they match the student's learning style and priorities. Returns a ranked
+    recommendation with explanations.
+
+    Note: requires professor names because course catalog scraping is not yet
+    available. Use search_professors to find candidates first.
 
     Args:
         university: University identifier (e.g. 'utd').
         course: Course code (e.g. 'CS 3341').
         professors: List of professor names to evaluate.
+        learning_style: Student's learning style. Supported values:
+            'visual', 'hands_on', 'reading', 'lecture', 'self_directed'.
         priorities: Optional list of priorities. Supported values:
             'easy_a' (high GPA), 'clear_lectures', 'low_workload',
             'accessible', 'engaging', 'learn_a_lot'.
@@ -531,6 +537,7 @@ async def recommend_professor(
         return "Provide at least one professor name to evaluate."
 
     priorities = priorities or []
+    learning_style = (learning_style or "").lower().strip()
     prefix, number = _parse_course(course)
 
     async def _evaluate(name: str) -> dict | None:
@@ -602,11 +609,29 @@ async def recommend_professor(
             elif p == "engaging":
                 if prof.avg_rating and prof.avg_rating >= 4.0:
                     score += 10
-                    reasons.append("Highly rated")
+                    strengths.append("Highly rated")
             elif p == "learn_a_lot":
                 if prof.avg_difficulty and prof.avg_difficulty >= 3.5:
                     score += 8
-                    reasons.append("Rigorous course")
+                    strengths.append("Rigorous course")
+
+        # Learning style matching
+        if learning_style and isinstance(ts, TeachingStyle):
+            if learning_style == "visual" and ts.lecture_quality == "clear":
+                score += 8
+                strengths.append("Clear visual presentations")
+            elif learning_style == "lecture" and ts.lecture_quality == "clear":
+                score += 10
+                strengths.append("Strong lecture delivery")
+            elif learning_style == "self_directed" and ts.accessibility == "high":
+                score += 8
+                strengths.append("Accessible for independent work")
+            elif learning_style == "hands_on" and ts.homework_load == "heavy":
+                score += 5
+                strengths.append("Lots of hands-on practice")
+            elif learning_style == "reading" and ts.uses_textbook is True:
+                score += 8
+                strengths.append("Textbook-based learning")
 
         # Warnings from NLP
         warnings = []
@@ -637,6 +662,8 @@ async def recommend_professor(
     lines = [
         f"# Professor Recommendations: {prefix} {number}",
     ]
+    if learning_style:
+        lines.append(f"Learning style: {learning_style}")
     if priorities:
         lines.append(f"Priorities: {', '.join(priorities)}")
     lines.append("")
@@ -681,6 +708,9 @@ async def get_prerequisites(
         course: Course code (e.g. 'CS 3345').
         depth: How many levels deep to show (1=direct only, 2=two levels).
     """
+    if university.lower().strip() != "utd":
+        return f"Prerequisite data is currently only available for UTD. '{university}' is not supported yet."
+
     prefix, number = _parse_course(course)
     code = f"{prefix} {number}"
     depth = max(1, min(5, depth))
