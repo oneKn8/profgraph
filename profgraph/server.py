@@ -14,6 +14,8 @@ from mcp.server.fastmcp import FastMCP
 from .cache import TTLCache
 from .grades import GradesClient, GradesError
 from .models import ProfessorProfile
+from .nlp import TeachingStyle
+from .prerequisites import get_prerequisites as _get_prereqs, get_unlocks
 from .rmp import RMPClient, RMPError
 
 mcp = FastMCP("profgraph_mcp")
@@ -151,6 +153,37 @@ async def get_professor_profile(university: str, professor: str) -> str:
         lines.append("## Teaching Style Tags")
         for name, count in prof.tags[:12]:
             lines.append(f"- {name} ({count}x)")
+        lines.append("")
+
+    ts = prof.teaching_style
+    if isinstance(ts, TeachingStyle):
+        lines.append("## Teaching Style (NLP-extracted)")
+        for label, val in [
+            ("Exam Style", ts.exam_style),
+            ("Homework Load", ts.homework_load),
+            ("Lecture Quality", ts.lecture_quality),
+            ("Curve Likelihood", ts.curve_likelihood),
+            ("Accessibility", ts.accessibility),
+        ]:
+            if val and val != "unknown":
+                lines.append(f"- {label}: {val}")
+        for label, val in [
+            ("Uses Textbook", ts.uses_textbook),
+            ("Records Lectures", ts.records_lectures),
+            ("Practice Exams", ts.provides_practice_exams),
+        ]:
+            if val is not None:
+                lines.append(f"- {label}: {'yes' if val else 'no'}")
+        if ts.warnings:
+            lines.append("")
+            lines.append("### Warnings")
+            for w in ts.warnings:
+                lines.append(f"- {w}")
+        if ts.best_for:
+            lines.append("")
+            lines.append(f"**Best for**: {', '.join(ts.best_for)}")
+        if ts.worst_for:
+            lines.append(f"**Challenging for**: {', '.join(ts.worst_for)}")
         lines.append("")
 
     if prof.courses:
@@ -358,6 +391,371 @@ async def compare_professors(university: str, professors: list[str]) -> str:
             lines.append("")
 
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: Intelligence tools
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+async def predict_grade(
+    university: str,
+    course: str,
+    professor: str,
+    student_gpa: float,
+) -> str:
+    """Predict likely grade outcome for a student based on historical data.
+
+    Uses the professor's grade distribution for this course combined with
+    the student's GPA to estimate grade probabilities. Higher GPA relative
+    to the course average means higher chance of A/B.
+
+    Args:
+        university: University identifier (e.g. 'utd').
+        course: Course code (e.g. 'CS 3341').
+        professor: Professor last name.
+        student_gpa: Student's current GPA (0.0 to 4.0).
+    """
+    student_gpa = max(0.0, min(4.0, student_gpa))
+    prefix, number = _parse_course(course)
+
+    try:
+        dists = await _grades.get_distribution(prefix, number, professor)
+    except (RMPError, GradesError) as e:
+        return f"Error: {e}"
+
+    if not dists:
+        return f"No grade data for {prefix} {number} with professor {professor}"
+
+    # Aggregate across semesters
+    total = sum(d.total_graded for d in dists)
+    if total == 0:
+        return "Insufficient data for prediction."
+
+    a_total = sum(d.a_plus + d.a + d.a_minus for d in dists)
+    b_total = sum(d.b_plus + d.b + d.b_minus for d in dists)
+    c_total = sum(d.c_plus + d.c + d.c_minus for d in dists)
+    d_total = sum(d.d_plus + d.d + d.d_minus for d in dists)
+    f_total = sum(d.f for d in dists)
+
+    # Base probabilities from distribution
+    base = {
+        "A": a_total / total,
+        "B": b_total / total,
+        "C": c_total / total,
+        "D": d_total / total,
+        "F": f_total / total,
+    }
+
+    # Course average GPA
+    valid = [d for d in dists if d.avg_gpa is not None]
+    course_gpa = sum(d.avg_gpa * d.total_graded for d in valid) / total if valid else 2.5
+
+    # Adjust based on student GPA relative to course average
+    # Students above average get probability shifted upward
+    gap = student_gpa - course_gpa
+    shift = gap * 0.15  # 15% shift per GPA point difference
+
+    adjusted = {}
+    grades_ordered = ["A", "B", "C", "D", "F"]
+    for i, g in enumerate(grades_ordered):
+        boost = shift * (2 - i)  # A gets most boost, F gets most penalty
+        adjusted[g] = max(0.01, base[g] + boost)
+    # Normalize
+    total_adj = sum(adjusted.values())
+    for g in adjusted:
+        adjusted[g] = round(adjusted[g] / total_adj * 100, 1)
+
+    most_likely = max(adjusted, key=adjusted.get)  # type: ignore[arg-type]
+
+    lines = [
+        f"# Grade Prediction: {prefix} {number}",
+        f"Professor: {professor} | Your GPA: {student_gpa}",
+        "",
+        f"Course average GPA: {course_gpa:.2f} ({total} students across {len(dists)} semesters)",
+    ]
+
+    if student_gpa > course_gpa + 0.5:
+        lines.append(f"Your GPA is well above the course average -- strong position.")
+    elif student_gpa > course_gpa:
+        lines.append(f"Your GPA is above the course average -- good position.")
+    elif student_gpa > course_gpa - 0.5:
+        lines.append(f"Your GPA is near the course average -- typical outcome expected.")
+    else:
+        lines.append(f"Your GPA is below the course average -- challenging but achievable.")
+
+    lines.extend([
+        "",
+        "## Predicted Grade Probabilities",
+        "",
+        "| Grade | Probability |",
+        "|-------|-------------|",
+    ])
+    for g in grades_ordered:
+        marker = " <--" if g == most_likely else ""
+        lines.append(f"| {g} | {adjusted[g]}%{marker} |")
+
+    lines.extend([
+        "",
+        f"**Most likely outcome: {most_likely}** ({adjusted[most_likely]}%)",
+        "",
+        f"Based on {total} historical student outcomes.",
+    ])
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def recommend_professor(
+    university: str,
+    course: str,
+    professors: list[str],
+    learning_style: str | None = None,
+    priorities: list[str] | None = None,
+) -> str:
+    """Rank professors for a course based on teaching style and student priorities.
+
+    Scores each professor on grade outcomes, teaching quality, and how well
+    they match the student's learning style and priorities. Returns a ranked
+    recommendation with explanations.
+
+    Note: requires professor names because course catalog scraping is not yet
+    available. Use search_professors to find candidates first.
+
+    Args:
+        university: University identifier (e.g. 'utd').
+        course: Course code (e.g. 'CS 3341').
+        professors: List of professor names to evaluate.
+        learning_style: Student's learning style. Supported values:
+            'visual', 'hands_on', 'reading', 'lecture', 'self_directed'.
+        priorities: Optional list of priorities. Supported values:
+            'easy_a' (high GPA), 'clear_lectures', 'low_workload',
+            'accessible', 'engaging', 'learn_a_lot'.
+    """
+    if not professors:
+        return "Provide at least one professor name to evaluate."
+
+    priorities = priorities or []
+    learning_style = (learning_style or "").lower().strip()
+    prefix, number = _parse_course(course)
+
+    async def _evaluate(name: str) -> dict | None:
+        try:
+            results = await _rmp.search(university, name)
+            if not results:
+                return None
+            prof = await _rmp.profile(results[0].rmp_id)
+        except (RMPError, GradesError):
+            return None
+
+        # Get grade data
+        try:
+            dists = await _grades.get_distribution(prefix, number, name)
+        except (RMPError, GradesError):
+            dists = []
+
+        course_gpa = None
+        if dists:
+            valid = [d for d in dists if d.avg_gpa is not None and d.total_graded > 0]
+            if valid:
+                course_gpa = round(
+                    sum(d.avg_gpa * d.total_graded for d in valid)
+                    / sum(d.total_graded for d in valid),
+                    2,
+                )
+
+        # Scoring
+        score = 0.0
+        strengths: list[str] = []
+        concerns: list[str] = []
+
+        # Base score from rating and WTA
+        if prof.avg_rating:
+            score += prof.avg_rating * 10  # 0-50
+        if prof.would_take_again and prof.would_take_again >= 0:
+            score += prof.would_take_again * 0.3  # 0-30
+
+        ts = prof.teaching_style
+
+        # Priority adjustments
+        for p in priorities:
+            if p == "easy_a" and course_gpa:
+                bonus = (course_gpa - 2.5) * 15
+                score += bonus
+                if course_gpa >= 3.0:
+                    strengths.append(f"High course GPA ({course_gpa})")
+            elif p == "clear_lectures" and isinstance(ts, TeachingStyle):
+                if ts.lecture_quality == "clear":
+                    score += 15
+                    strengths.append("Clear lectures")
+                elif ts.lecture_quality == "unclear":
+                    score -= 15
+                    concerns.append("Lecture clarity concerns")
+            elif p == "low_workload" and isinstance(ts, TeachingStyle):
+                if ts.homework_load == "light":
+                    score += 12
+                    strengths.append("Light workload")
+                elif ts.homework_load == "heavy":
+                    score -= 12
+                    concerns.append("Heavy workload")
+            elif p == "accessible" and isinstance(ts, TeachingStyle):
+                if ts.accessibility == "high":
+                    score += 10
+                    strengths.append("Highly accessible")
+                elif ts.accessibility == "low":
+                    score -= 10
+                    concerns.append("Limited accessibility")
+            elif p == "engaging":
+                if prof.avg_rating and prof.avg_rating >= 4.0:
+                    score += 10
+                    strengths.append("Highly rated")
+            elif p == "learn_a_lot":
+                if prof.avg_difficulty and prof.avg_difficulty >= 3.5:
+                    score += 8
+                    strengths.append("Rigorous course")
+
+        # Learning style matching
+        if learning_style and isinstance(ts, TeachingStyle):
+            if learning_style == "visual" and ts.lecture_quality == "clear":
+                score += 8
+                strengths.append("Clear visual presentations")
+            elif learning_style == "lecture" and ts.lecture_quality == "clear":
+                score += 10
+                strengths.append("Strong lecture delivery")
+            elif learning_style == "self_directed" and ts.accessibility == "high":
+                score += 8
+                strengths.append("Accessible for independent work")
+            elif learning_style == "hands_on" and ts.homework_load == "heavy":
+                score += 5
+                strengths.append("Lots of hands-on practice")
+            elif learning_style == "reading" and ts.uses_textbook is True:
+                score += 8
+                strengths.append("Textbook-based learning")
+
+        # Warnings from NLP
+        warnings = []
+        if isinstance(ts, TeachingStyle) and ts.warnings:
+            warnings = ts.warnings[:3]
+
+        return {
+            "name": f"{prof.first_name} {prof.last_name}",
+            "score": round(score, 1),
+            "rating": prof.avg_rating,
+            "difficulty": prof.avg_difficulty,
+            "wta": prof.would_take_again,
+            "course_gpa": course_gpa,
+            "strengths": strengths,
+            "concerns": concerns,
+            "warnings": warnings,
+            "best_for": ts.best_for if isinstance(ts, TeachingStyle) else [],
+        }
+
+    results = await asyncio.gather(*(_evaluate(n) for n in professors))
+    evaluated = [r for r in results if r is not None]
+
+    if not evaluated:
+        return "Could not evaluate any of the listed professors."
+
+    evaluated.sort(key=lambda r: r["score"], reverse=True)
+
+    lines = [
+        f"# Professor Recommendations: {prefix} {number}",
+    ]
+    if learning_style:
+        lines.append(f"Learning style: {learning_style}")
+    if priorities:
+        lines.append(f"Priorities: {', '.join(priorities)}")
+    lines.append("")
+
+    for rank, r in enumerate(evaluated, 1):
+        medal = {1: "[TOP PICK]", 2: "[RUNNER-UP]"}.get(rank, "")
+        wta = _fmt_wta(r["wta"])
+        lines.extend([
+            f"## {rank}. {r['name']} {medal}",
+            f"Rating: {r['rating']}/5 | Difficulty: {r['difficulty']}/5 | WTA: {wta}",
+        ])
+        if r["course_gpa"]:
+            lines.append(f"Course GPA for {prefix} {number}: {r['course_gpa']}")
+        if r["strengths"]:
+            lines.append(f"Strengths: {', '.join(r['strengths'])}")
+        if r["concerns"]:
+            lines.append(f"Concerns: {', '.join(r['concerns'])}")
+        if r["warnings"]:
+            lines.append("Warnings:")
+            for w in r["warnings"]:
+                lines.append(f"  - {w}")
+        if r["best_for"]:
+            lines.append(f"Best for: {', '.join(r['best_for'])}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def get_prerequisites(
+    university: str,
+    course: str,
+    depth: int = 2,
+) -> str:
+    """Get prerequisite courses for a given course from the knowledge graph.
+
+    Shows what courses must be completed before taking the target course,
+    and what courses the target course unlocks.
+
+    Args:
+        university: University identifier (e.g. 'utd').
+        course: Course code (e.g. 'CS 3345').
+        depth: How many levels deep to show (1=direct only, 2=two levels).
+    """
+    if university.lower().strip() != "utd":
+        return f"Prerequisite data is currently only available for UTD. '{university}' is not supported yet."
+
+    prefix, number = _parse_course(course)
+    code = f"{prefix} {number}"
+    depth = max(1, min(5, depth))
+
+    tree = _get_prereqs(code, depth)
+    unlocks = get_unlocks(code)
+
+    prereqs = tree.get("prerequisites", [])
+    if not prereqs and not unlocks:
+        return f"No prerequisite data found for {code} at {university.upper()}"
+
+    lines = [f"# Prerequisites: {code}", ""]
+
+    if prereqs:
+        lines.append("## Required Before Taking This Course")
+        _render_tree(tree, lines, indent=0)
+        lines.append("")
+    else:
+        lines.append("No prerequisites required.")
+        lines.append("")
+
+    if unlocks:
+        lines.append("## Courses This Unlocks")
+        for u in unlocks:
+            lines.append(f"- {u}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def _render_tree(node: dict, lines: list[str], indent: int) -> None:
+    """Recursively render prerequisite tree."""
+    prereqs = node.get("prerequisites", [])
+    children = node.get("children", [])
+
+    if indent == 0:
+        for p in prereqs:
+            lines.append(f"- {p}")
+    if children:
+        for child in children:
+            prefix = "  " * indent + "- "
+            child_prereqs = child.get("prerequisites", [])
+            if child_prereqs:
+                lines.append(f"{prefix}{child['course']} requires: {', '.join(child_prereqs)}")
+            _render_tree(child, lines, indent + 1)
 
 
 def main():

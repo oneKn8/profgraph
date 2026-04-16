@@ -34,6 +34,7 @@ class ProfessorProfile:
     tags: list[tuple[str, int]] = field(default_factory=list)
     courses: list[tuple[str, int]] = field(default_factory=list)
     reviews: list[dict] = field(default_factory=list)
+    teaching_style: object | None = None  # nlp.TeachingStyle, set after profile fetch
 
 
 @dataclass
