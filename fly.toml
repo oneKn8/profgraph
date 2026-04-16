@@ -1,3 +1,5 @@
+# Before first deploy, create the persistent volume:
+#   fly volumes create profgraph_data --region dfw --size 1
 app = "profgraph"
 primary_region = "dfw"
 

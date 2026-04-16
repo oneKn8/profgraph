@@ -31,6 +31,9 @@ class IntelEntry:
     submitted_at: float = 0.0
 
 
+MAX_NOTES_LENGTH = 500
+
+
 class IntelStore:
     """SQLite-backed community intel storage."""
 
@@ -64,6 +67,8 @@ class IntelStore:
     def submit(self, entry: IntelEntry) -> int:
         """Store a new intel entry. Returns the entry ID."""
         entry.submitted_at = entry.submitted_at or time.time()
+        if entry.notes and len(entry.notes) > MAX_NOTES_LENGTH:
+            entry.notes = entry.notes[:MAX_NOTES_LENGTH]
         with sqlite3.connect(self._path) as conn:
             cursor = conn.execute(
                 """INSERT INTO intel

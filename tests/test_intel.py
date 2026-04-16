@@ -1,15 +1,15 @@
 """Unit tests for community intel storage."""
 
 import tempfile
-from pathlib import Path
 
 from profgraph.intel import IntelStore, IntelEntry
 
 
 def _store() -> IntelStore:
     """Create a temp store for testing."""
-    tmp = tempfile.mktemp(suffix=".db")
-    return IntelStore(db_path=tmp)
+    f = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+    f.close()
+    return IntelStore(db_path=f.name)
 
 
 class TestIntelStore:
