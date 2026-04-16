@@ -8,6 +8,7 @@ import httpx
 
 from .cache import TTLCache
 from .models import ProfessorProfile, ProfessorSummary
+from .nlp import extract_teaching_style
 
 RMP_URL = "https://www.ratemyprofessors.com/graphql"
 
@@ -224,6 +225,7 @@ class RMPClient:
             tags=[(t["tagName"], t["tagCount"]) for t in tags],
             courses=[(c["courseName"], c["courseCount"]) for c in courses],
             reviews=reviews,
+            teaching_style=extract_teaching_style(reviews),
         )
 
         self._cache.set(cache_key, prof)
