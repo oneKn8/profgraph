@@ -16,11 +16,11 @@ class TTLCache:
             value, expires = self._store[key]
             if time.time() < expires:
                 return value
-            del self._store[key]
+            self._store.pop(key, None)
         return None
 
     def set(self, key: str, value: Any, ttl: int | None = None) -> None:
-        self._store[key] = (value, time.time() + (ttl or self._default_ttl))
+        self._store[key] = (value, time.time() + (self._default_ttl if ttl is None else ttl))
 
     def clear(self) -> None:
         self._store.clear()

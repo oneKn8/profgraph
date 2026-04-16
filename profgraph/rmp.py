@@ -1,13 +1,22 @@
 """RateMyProfessors GraphQL client."""
 
+from __future__ import annotations
+
+import os
+
 import httpx
 
 from .cache import TTLCache
 from .models import ProfessorProfile, ProfessorSummary
 
 RMP_URL = "https://www.ratemyprofessors.com/graphql"
+
+# Public RMP token (base64 "test:test") used by the open-source community.
+# Override via PROFGRAPH_RMP_AUTH env var if RMP rotates this credential.
+_RMP_AUTH = os.environ.get("PROFGRAPH_RMP_AUTH", "Basic dGVzdDp0ZXN0")
+
 RMP_HEADERS = {
-    "Authorization": "Basic dGVzdDp0ZXN0",
+    "Authorization": _RMP_AUTH,
     "Content-Type": "application/json",
     "User-Agent": "Mozilla/5.0",
     "Referer": "https://www.ratemyprofessors.com/",
@@ -80,6 +89,10 @@ query TeacherDetail($id: ID!) {
 """
 
 
+class RMPError(Exception):
+    """Raised when RMP API calls fail."""
+
+
 class RMPClient:
     def __init__(self, cache: TTLCache):
         self._cache = cache
@@ -89,24 +102,34 @@ class RMPClient:
         key = SCHOOL_ALIASES.get(key, key)
         if key not in SCHOOL_IDS:
             supported = ", ".join(sorted(SCHOOL_IDS))
-            raise ValueError(
+            raise RMPError(
                 f"University '{university}' not supported. Available: {supported}"
             )
         return SCHOOL_IDS[key]
 
     async def _post(self, query: str, variables: dict) -> dict:
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                RMP_URL,
-                json={"query": query, "variables": variables},
-                headers=RMP_HEADERS,
-                timeout=15.0,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            if "errors" in data:
-                raise RuntimeError(f"GraphQL errors: {data['errors']}")
-            return data
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(
+                    RMP_URL,
+                    json={"query": query, "variables": variables},
+                    headers=RMP_HEADERS,
+                    timeout=15.0,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                if "errors" in data:
+                    raise RMPError(f"GraphQL errors: {data['errors']}")
+                return data
+        except httpx.HTTPStatusError as e:
+            code = e.response.status_code
+            if code == 403:
+                raise RMPError("RMP API rejected the request (403). The auth token may need updating.") from e
+            if code == 429:
+                raise RMPError("RMP rate limit exceeded. Try again in a few minutes.") from e
+            raise RMPError(f"RMP API error: HTTP {code}") from e
+        except httpx.RequestError as e:
+            raise RMPError(f"Network error reaching RMP: {e}") from e
 
     async def search(
         self, university: str, query: str
@@ -158,7 +181,7 @@ class RMPClient:
         data = await self._post(DETAIL_QUERY, {"id": rmp_id})
         node = data.get("data", {}).get("node")
         if not node:
-            raise ValueError(f"Professor not found: {rmp_id}")
+            raise RMPError(f"Professor not found: {rmp_id}")
 
         tags = sorted(
             node.get("teacherRatingTags", []),

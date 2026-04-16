@@ -104,10 +104,12 @@ class GradeDistribution:
 
     @property
     def semester_display(self) -> str:
-        """Convert '23F' -> 'Fall 2023', '21S' -> 'Spring 2021'."""
-        if len(self.semester) < 3:
-            return self.semester
-        year = self.semester[:2]
-        term = self.semester[2]
+        """Convert '23F' -> 'Fall 2023', '21S' -> 'Spring 2021'.
+
+        Nebula API _id format: 2-digit year + term letter (F/S/U).
+        """
+        s = self.semester
+        if len(s) < 3 or not s[:2].isdigit() or s[2] not in "FSU":
+            return s
         names = {"F": "Fall", "S": "Spring", "U": "Summer"}
-        return f"{names.get(term, term)} 20{year}"
+        return f"{names[s[2]]} 20{s[:2]}"
