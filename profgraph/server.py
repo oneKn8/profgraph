@@ -17,6 +17,7 @@ from .models import ProfessorProfile
 from .nlp import TeachingStyle
 from .prerequisites import get_prerequisites as _get_prereqs, get_unlocks
 from .rmp import RMPClient, RMPError
+from .universities import list_supported, resolve as resolve_university
 
 mcp = FastMCP("profgraph_mcp")
 
@@ -46,6 +47,26 @@ def _fmt_wta(pct: float | None) -> str:
 # ---------------------------------------------------------------------------
 # Tools
 # ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+async def list_universities() -> str:
+    """List all supported universities with their identifiers.
+
+    Use the 'key' value as the university parameter in other tools.
+    Grade data availability varies by university.
+    """
+    unis = list_supported()
+    lines = ["# Supported Universities", ""]
+    for u in unis:
+        grade_note = "with grade data" if u.grade_source != "none" else "professor data only"
+        lines.append(f"- **{u.key}**: {u.name} ({u.city}, {u.state}) -- {grade_note}")
+    lines.extend([
+        "",
+        "All universities support professor search, profiles, comparisons, "
+        "and recommendations. Grade distributions are currently available for UTD only.",
+    ])
+    return "\n".join(lines)
 
 
 @mcp.tool()
@@ -237,7 +258,7 @@ async def get_grade_distribution(
     """
     prefix, number = _parse_course(course)
     try:
-        dists = await _grades.get_distribution(prefix, number, professor, semester)
+        dists = await _grades.get_distribution(university, prefix, number, professor, semester)
     except (RMPError, GradesError) as e:
         return f"Error: {e}"
 
@@ -421,7 +442,7 @@ async def predict_grade(
     prefix, number = _parse_course(course)
 
     try:
-        dists = await _grades.get_distribution(prefix, number, professor)
+        dists = await _grades.get_distribution(university, prefix, number, professor)
     except (RMPError, GradesError) as e:
         return f"Error: {e}"
 
@@ -551,7 +572,7 @@ async def recommend_professor(
 
         # Get grade data
         try:
-            dists = await _grades.get_distribution(prefix, number, name)
+            dists = await _grades.get_distribution(university, prefix, number, name)
         except (RMPError, GradesError):
             dists = []
 

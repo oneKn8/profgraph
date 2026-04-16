@@ -3,12 +3,15 @@
 import asyncio
 import sys
 
+from profgraph.cache import TTLCache
+
+_cache = TTLCache()
+
 
 async def test_search():
     from profgraph.rmp import RMPClient
-    from profgraph.cache import TTLCache
 
-    cache = TTLCache()
+    cache = _cache
     client = RMPClient(cache)
     results = await client.search("utd", "Jason Smith")
     assert len(results) > 0, "No results for Jason Smith"
@@ -21,9 +24,9 @@ async def test_search():
 
 async def test_profile(rmp_id: str):
     from profgraph.rmp import RMPClient
-    from profgraph.cache import TTLCache
+    
 
-    cache = TTLCache()
+    cache = _cache
     client = RMPClient(cache)
     prof = await client.profile(rmp_id)
     assert prof.first_name == "Jason"
@@ -36,11 +39,11 @@ async def test_profile(rmp_id: str):
 
 async def test_grades():
     from profgraph.grades import GradesClient
-    from profgraph.cache import TTLCache
+    
 
-    cache = TTLCache()
+    cache = _cache
     client = GradesClient(cache)
-    dists = await client.get_distribution("CS", "3341")
+    dists = await client.get_distribution("utd", "CS", "3341")
     assert len(dists) > 0, "No grade data"
     latest = dists[0]
     assert latest.total > 0
@@ -50,11 +53,11 @@ async def test_grades():
 
 async def test_grades_filtered():
     from profgraph.grades import GradesClient
-    from profgraph.cache import TTLCache
+    
 
-    cache = TTLCache()
+    cache = _cache
     client = GradesClient(cache)
-    dists = await client.get_distribution("CS", "3341", professor="smith")
+    dists = await client.get_distribution("utd", "CS", "3341", professor="smith")
     print(f"  grades filtered (smith): {len(dists)} semesters")
 
 

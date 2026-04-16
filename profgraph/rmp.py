@@ -9,6 +9,7 @@ import httpx
 from .cache import TTLCache
 from .models import ProfessorProfile, ProfessorSummary
 from .nlp import extract_teaching_style
+from .universities import resolve as resolve_university
 
 RMP_URL = "https://www.ratemyprofessors.com/graphql"
 
@@ -21,15 +22,6 @@ RMP_HEADERS = {
     "Content-Type": "application/json",
     "User-Agent": "Mozilla/5.0",
     "Referer": "https://www.ratemyprofessors.com/",
-}
-
-SCHOOL_IDS: dict[str, str] = {
-    "utd": "U2Nob29sLTEyNzM=",
-}
-
-SCHOOL_ALIASES: dict[str, str] = {
-    "ut dallas": "utd",
-    "university of texas at dallas": "utd",
 }
 
 SEARCH_QUERY = """
@@ -99,14 +91,11 @@ class RMPClient:
         self._cache = cache
 
     def _school_id(self, university: str) -> str:
-        key = university.lower().strip()
-        key = SCHOOL_ALIASES.get(key, key)
-        if key not in SCHOOL_IDS:
-            supported = ", ".join(sorted(SCHOOL_IDS))
-            raise RMPError(
-                f"University '{university}' not supported. Available: {supported}"
-            )
-        return SCHOOL_IDS[key]
+        try:
+            uni = resolve_university(university)
+        except ValueError as e:
+            raise RMPError(str(e)) from e
+        return uni.rmp_school_id
 
     async def _post(self, query: str, variables: dict) -> dict:
         try:

@@ -1,4 +1,9 @@
-"""Grade distribution client using UTD Nebula Trends API."""
+"""Grade distribution client with pluggable university adapters.
+
+Currently supports:
+- UTD via Nebula Trends API
+- Other universities: graceful "no data" fallback
+"""
 
 from __future__ import annotations
 
@@ -6,6 +11,7 @@ import httpx
 
 from .cache import TTLCache
 from .models import GradeDistribution
+from .universities import resolve as resolve_university
 
 NEBULA_URL = "https://trends.utdnebula.com/api/grades"
 
@@ -29,12 +35,39 @@ class GradesClient:
 
     async def get_distribution(
         self,
+        university: str,
         prefix: str,
         number: str,
         professor: str | None = None,
         semester: str | None = None,
     ) -> list[GradeDistribution]:
-        cache_key = f"grades:{prefix}:{number}:{professor}:{semester}"
+        """Get grade distributions, dispatching to the right adapter.
+
+        Args:
+            university: University key (e.g. 'utd', 'tamu').
+            prefix: Course prefix (e.g. 'CS').
+            number: Course number (e.g. '3341').
+            professor: Optional professor filter.
+            semester: Optional semester filter.
+        """
+        try:
+            uni = resolve_university(university)
+        except ValueError:
+            return []
+
+        if uni.grade_source == "nebula":
+            return await self._nebula(prefix, number, professor, semester)
+        # Future: add more adapters here (tamu_registrar, csv, etc.)
+        return []
+
+    async def _nebula(
+        self,
+        prefix: str,
+        number: str,
+        professor: str | None = None,
+        semester: str | None = None,
+    ) -> list[GradeDistribution]:
+        cache_key = f"grades:nebula:{prefix}:{number}:{professor}:{semester}"
         cached = self._cache.get(cache_key)
         if cached is not None:
             return cached
@@ -66,7 +99,6 @@ class GradesClient:
             kwargs["semester"] = sem_id
             results.append(GradeDistribution(**kwargs))
 
-        # Filter by semester if requested
         if semester:
             sem_upper = semester.upper()
             results = [d for d in results if d.semester.upper() == sem_upper]
