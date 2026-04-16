@@ -40,7 +40,7 @@ async def test_grades():
 
     cache = TTLCache()
     client = GradesClient(cache)
-    dists = await client.get_distribution("CS", "3341")
+    dists = await client.get_distribution("utd", "CS", "3341")
     assert len(dists) > 0, "No grade data"
     latest = dists[0]
     assert latest.total > 0
@@ -54,7 +54,7 @@ async def test_grades_filtered():
 
     cache = TTLCache()
     client = GradesClient(cache)
-    dists = await client.get_distribution("CS", "3341", professor="smith")
+    dists = await client.get_distribution("utd", "CS", "3341", professor="smith")
     print(f"  grades filtered (smith): {len(dists)} semesters")
 
 
