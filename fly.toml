@@ -1,0 +1,28 @@
+# Before first deploy, create the persistent volume:
+#   fly volumes create profgraph_data --region dfw --size 1
+app = "profgraph"
+primary_region = "dfw"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PROFGRAPH_TRANSPORT = "streamable-http"
+  PROFGRAPH_HOST = "0.0.0.0"
+  PROFGRAPH_PORT = "8000"
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+[[vm]]
+  memory = "256mb"
+  cpu_kind = "shared"
+  cpus = 1
+
+[mounts]
+  source = "profgraph_data"
+  destination = "/app/data"

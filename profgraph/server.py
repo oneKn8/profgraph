@@ -8,22 +8,29 @@ course recommendations instead of hallucinated guesses.
 from __future__ import annotations
 
 import asyncio
+import os
 
 from mcp.server.fastmcp import FastMCP
 
 from .cache import TTLCache
 from .grades import GradesClient, GradesError
+from .intel import IntelStore, IntelEntry
 from .models import ProfessorProfile
 from .nlp import TeachingStyle
 from .prerequisites import get_prerequisites as _get_prereqs, get_unlocks
 from .rmp import RMPClient, RMPError
 from .universities import list_supported, resolve as resolve_university
 
-mcp = FastMCP("profgraph_mcp")
+mcp = FastMCP(
+    "profgraph_mcp",
+    host=os.environ.get("PROFGRAPH_HOST", "0.0.0.0"),
+    port=int(os.environ.get("PROFGRAPH_PORT", "8000")),
+)
 
 _cache = TTLCache(default_ttl=86400)
 _rmp = RMPClient(_cache)
 _grades = GradesClient(_cache)
+_intel = IntelStore()
 
 
 def _parse_course(course: str) -> tuple[str, str]:
@@ -779,8 +786,122 @@ def _render_tree(node: dict, lines: list[str], indent: int) -> None:
             _render_tree(child, lines, indent + 1)
 
 
+# ---------------------------------------------------------------------------
+# Phase 4: Community intel tools
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+async def submit_intel(
+    university: str,
+    course: str,
+    professor: str,
+    semester: str,
+    exam_weight: int | None = None,
+    homework_weight: int | None = None,
+    curve: str | None = None,
+    textbook_required: bool | None = None,
+    notes: str | None = None,
+) -> str:
+    """Submit crowdsourced syllabus intel for a course and professor.
+
+    Community-contributed data about exam weights, curve policies, textbook
+    requirements, and other course-specific information. This data helps
+    other students make informed decisions.
+
+    Args:
+        university: University identifier (e.g. 'utd').
+        course: Course code (e.g. 'CS 3341').
+        professor: Professor's name.
+        semester: Semester code (e.g. '26S' for Spring 2026).
+        exam_weight: Percentage of grade from exams (0-100).
+        homework_weight: Percentage of grade from homework (0-100).
+        curve: Curve policy ('none', 'unlikely', 'likely', 'guaranteed').
+        textbook_required: Whether the textbook is required.
+        notes: Free-text notes about the course (max 500 chars).
+    """
+    if exam_weight is not None and not (0 <= exam_weight <= 100):
+        return "Error: exam_weight must be between 0 and 100."
+    if homework_weight is not None and not (0 <= homework_weight <= 100):
+        return "Error: homework_weight must be between 0 and 100."
+    if curve and curve not in ("none", "unlikely", "likely", "guaranteed"):
+        return "Error: curve must be 'none', 'unlikely', 'likely', or 'guaranteed'."
+
+    prefix, number = _parse_course(course)
+    entry = IntelEntry(
+        university=university,
+        course=f"{prefix} {number}",
+        professor=professor,
+        semester=semester.upper(),
+        exam_weight=exam_weight,
+        homework_weight=homework_weight,
+        curve=curve,
+        textbook_required=textbook_required,
+        notes=(notes or "")[:500] if notes else None,
+    )
+
+    entry_id = _intel.submit(entry)
+    return (
+        f"Intel submitted (ID: {entry_id}). "
+        f"Course: {prefix} {number}, Professor: {professor}, Semester: {semester}. "
+        "Thank you for contributing!"
+    )
+
+
+@mcp.tool()
+async def get_intel(
+    university: str,
+    course: str,
+    professor: str | None = None,
+) -> str:
+    """Get community-contributed syllabus intel for a course.
+
+    Returns crowdsourced data about exam weights, curve policies, textbook
+    requirements, and student notes. Data is contributed by other students
+    via submit_intel.
+
+    Args:
+        university: University identifier (e.g. 'utd').
+        course: Course code (e.g. 'CS 3341').
+        professor: Optional professor name to filter results.
+    """
+    prefix, number = _parse_course(course)
+    entries = _intel.query(university, f"{prefix} {number}", professor)
+
+    if not entries:
+        extra = f" with {professor}" if professor else ""
+        return (
+            f"No community intel found for {prefix} {number}{extra} at {university.upper()}. "
+            "Use submit_intel to contribute!"
+        )
+
+    lines = [f"# Community Intel: {prefix} {number}", ""]
+
+    for e in entries:
+        lines.append(f"## {e.professor} ({e.semester})")
+        if e.exam_weight is not None:
+            lines.append(f"- Exam weight: {e.exam_weight}%")
+        if e.homework_weight is not None:
+            lines.append(f"- Homework weight: {e.homework_weight}%")
+        if e.curve:
+            lines.append(f"- Curve: {e.curve}")
+        if e.textbook_required is not None:
+            lines.append(f"- Textbook required: {'yes' if e.textbook_required else 'no'}")
+        if e.notes:
+            lines.append(f"- Notes: {e.notes}")
+        lines.append("")
+
+    total = _intel.count(university)
+    lines.append(f"_{total} total intel entries for {university.upper()}_")
+
+    return "\n".join(lines)
+
+
 def main():
-    mcp.run()
+    transport = os.environ.get("PROFGRAPH_TRANSPORT", "stdio")
+    if transport not in ("stdio", "streamable-http"):
+        transport = "stdio"
+    mcp.run(transport=transport)
 
 
 if __name__ == "__main__":
