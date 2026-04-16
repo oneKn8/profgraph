@@ -47,7 +47,11 @@ def _fmt_wta(pct: float | None) -> str:
 
 
 @mcp.tool()
-async def search_professors(university: str, query: str) -> str:
+async def search_professors(
+    university: str,
+    query: str,
+    department: str | None = None,
+) -> str:
     """Search for professors at a university by name.
 
     Returns matching professors with their overall rating, difficulty score,
@@ -57,14 +61,20 @@ async def search_professors(university: str, query: str) -> str:
     Args:
         university: University identifier (e.g. 'utd' for UT Dallas).
         query: Professor name or partial name to search for.
+        department: Optional department filter (e.g. 'Computer Science').
     """
     try:
         results = await _rmp.search(university, query)
     except (RMPError, GradesError) as e:
         return f"Error: {e}"
 
+    if department:
+        dept_lower = department.lower()
+        results = [p for p in results if dept_lower in p.department.lower()]
+
     if not results:
-        return f"No professors found matching '{query}' at {university.upper()}"
+        extra = f" in {department}" if department else ""
+        return f"No professors found matching '{query}'{extra} at {university.upper()}"
 
     lines = [f"# Professors matching '{query}' at {university.upper()}", ""]
     for p in results:
@@ -217,13 +227,12 @@ async def get_grade_distribution(
     total_w = sum(d.w for d in dists)
 
     overall_gpa = None
-    if total_graded > 0:
-        gpa_sum = sum(
-            (d.avg_gpa or 0) * d.total_graded
-            for d in dists
-            if d.avg_gpa is not None
-        )
-        overall_gpa = round(gpa_sum / total_graded, 2)
+    graded_semesters = [d for d in dists if d.avg_gpa is not None]
+    if graded_semesters:
+        gpa_sum = sum(d.avg_gpa * d.total_graded for d in graded_semesters)
+        denom = sum(d.total_graded for d in graded_semesters)
+        if denom > 0:
+            overall_gpa = round(gpa_sum / denom, 2)
 
     def pct(n: int) -> str:
         return f"{n / total_all * 100:.1f}%" if total_all else "0%"
@@ -282,25 +291,35 @@ async def compare_professors(university: str, professors: list[str]) -> str:
     if len(professors) < 2:
         return "Need at least 2 professors to compare."
 
+    errors: dict[str, str] = {}
+
     async def _fetch(name: str) -> tuple[str, ProfessorProfile | None]:
         try:
             results = await _rmp.search(university, name)
             if not results:
                 return name, None
             return name, await _rmp.profile(results[0].rmp_id)
-        except (RMPError, GradesError):
+        except (RMPError, GradesError) as e:
+            errors[name] = str(e)
             return name, None
 
     fetched = await asyncio.gather(*(_fetch(n) for n in professors))
     pairs: list[tuple[str, ProfessorProfile | None]] = list(fetched)
 
     if not any(p for _, p in pairs):
+        if errors:
+            detail = "; ".join(f"{n}: {e}" for n, e in errors.items())
+            return f"Could not fetch any professors. Errors: {detail}"
         return "None of the specified professors were found."
 
-    headers = ["Metric"] + [
-        f"{p.first_name} {p.last_name}" if p else f"{n} (not found)"
-        for n, p in pairs
-    ]
+    def _header(n: str, p: ProfessorProfile | None) -> str:
+        if p:
+            return f"{p.first_name} {p.last_name}"
+        if n in errors:
+            return f"{n} (error)"
+        return f"{n} (not found)"
+
+    headers = ["Metric"] + [_header(n, p) for n, p in pairs]
 
     lines = [
         "# Professor Comparison",
