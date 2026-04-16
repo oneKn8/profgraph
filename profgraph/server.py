@@ -12,9 +12,9 @@ import asyncio
 from mcp.server.fastmcp import FastMCP
 
 from .cache import TTLCache
-from .grades import GradesClient
+from .grades import GradesClient, GradesError
 from .models import ProfessorProfile
-from .rmp import RMPClient
+from .rmp import RMPClient, RMPError
 
 mcp = FastMCP("profgraph_mcp")
 
@@ -58,7 +58,11 @@ async def search_professors(university: str, query: str) -> str:
         university: University identifier (e.g. 'utd' for UT Dallas).
         query: Professor name or partial name to search for.
     """
-    results = await _rmp.search(university, query)
+    try:
+        results = await _rmp.search(university, query)
+    except (RMPError, GradesError) as e:
+        return f"Error: {e}"
+
     if not results:
         return f"No professors found matching '{query}' at {university.upper()}"
 
@@ -84,19 +88,46 @@ async def get_professor_profile(university: str, professor: str) -> str:
     frequency -- they reveal patterns like 'Tough grader', 'Lots of homework',
     or 'Amazing lectures'.
 
+    If multiple professors match the name, the best match is used and
+    alternatives are listed. Use search_professors first for precise control.
+
     Args:
         university: University identifier (e.g. 'utd').
         professor: Professor name to look up.
     """
-    results = await _rmp.search(university, professor)
+    try:
+        results = await _rmp.search(university, professor)
+    except (RMPError, GradesError) as e:
+        return f"Error: {e}"
+
     if not results:
         return f"Professor '{professor}' not found at {university.upper()}"
 
-    prof = await _rmp.profile(results[0].rmp_id)
+    # Disambiguation: note if multiple matches
+    disambig = ""
+    if len(results) > 1:
+        others = ", ".join(
+            f"{p.first_name} {p.last_name} ({p.department})"
+            for p in results[1:4]
+        )
+        disambig = (
+            f"\n> Note: Showing top match. Other matches: {others}. "
+            "Use search_professors for the full list.\n"
+        )
+
+    try:
+        prof = await _rmp.profile(results[0].rmp_id)
+    except (RMPError, GradesError) as e:
+        return f"Error fetching profile: {e}"
 
     lines = [
         f"# {prof.first_name} {prof.last_name}",
         f"{prof.department} | {university.upper()}",
+    ]
+    if disambig:
+        lines.append(disambig)
+
+    lines.extend([
         "",
         "## Ratings",
         f"- Overall: {prof.avg_rating}/5",
@@ -104,7 +135,7 @@ async def get_professor_profile(university: str, professor: str) -> str:
         f"- Would Take Again: {_fmt_wta(prof.would_take_again)}",
         f"- Total Reviews: {prof.num_ratings}",
         "",
-    ]
+    ])
 
     if prof.tags:
         lines.append("## Teaching Style Tags")
@@ -147,23 +178,33 @@ async def get_grade_distribution(
     university: str,
     course: str,
     professor: str | None = None,
+    semester: str | None = None,
 ) -> str:
     """Get historical grade distributions for a course from public records.
 
     Returns letter grade percentages, average GPA, and total enrollment
     broken down by semester. Data comes from FOIA/TPIA public records.
-    Optionally filter by professor last name.
+    Optionally filter by professor last name or semester code.
 
     Args:
         university: University identifier (e.g. 'utd').
         course: Course code (e.g. 'CS 3341' or 'CS3341').
         professor: Optional professor last name to filter results.
+        semester: Optional semester code to filter (e.g. '25F' for Fall 2025).
     """
     prefix, number = _parse_course(course)
-    dists = await _grades.get_distribution(prefix, number, professor)
+    try:
+        dists = await _grades.get_distribution(prefix, number, professor, semester)
+    except (RMPError, GradesError) as e:
+        return f"Error: {e}"
 
     if not dists:
-        extra = f" (professor: {professor})" if professor else ""
+        filters = []
+        if professor:
+            filters.append(f"professor: {professor}")
+        if semester:
+            filters.append(f"semester: {semester}")
+        extra = f" ({', '.join(filters)})" if filters else ""
         return f"No grade data found for {prefix} {number}{extra}"
 
     total_graded = sum(d.total_graded for d in dists)
@@ -197,7 +238,7 @@ async def get_grade_distribution(
         "",
         "## Overall",
     ]
-    if overall_gpa:
+    if overall_gpa is not None:
         lines.append(f"Average GPA: {overall_gpa}")
     lines.extend([
         "",
@@ -215,7 +256,7 @@ async def get_grade_distribution(
     ])
 
     for d in dists[:10]:
-        gpa_str = f" | GPA: {d.avg_gpa}" if d.avg_gpa else ""
+        gpa_str = f" | GPA: {d.avg_gpa}" if d.avg_gpa is not None else ""
         lines.extend([
             f"### {d.semester_display} ({d.total} students{gpa_str})",
             f"A: {d.pct('A')}% | B: {d.pct('B')}% | C: {d.pct('C')}% | "
@@ -242,21 +283,23 @@ async def compare_professors(university: str, professors: list[str]) -> str:
         return "Need at least 2 professors to compare."
 
     async def _fetch(name: str) -> tuple[str, ProfessorProfile | None]:
-        results = await _rmp.search(university, name)
-        if not results:
+        try:
+            results = await _rmp.search(university, name)
+            if not results:
+                return name, None
+            return name, await _rmp.profile(results[0].rmp_id)
+        except (RMPError, GradesError):
             return name, None
-        return name, await _rmp.profile(results[0].rmp_id)
 
     fetched = await asyncio.gather(*(_fetch(n) for n in professors))
-    profiles: dict[str, ProfessorProfile | None] = dict(fetched)
+    pairs: list[tuple[str, ProfessorProfile | None]] = list(fetched)
 
-    if not any(profiles.values()):
+    if not any(p for _, p in pairs):
         return "None of the specified professors were found."
 
-    names = list(profiles.keys())
     headers = ["Metric"] + [
         f"{p.first_name} {p.last_name}" if p else f"{n} (not found)"
-        for n, p in profiles.items()
+        for n, p in pairs
     ]
 
     lines = [
@@ -283,12 +326,12 @@ async def compare_professors(university: str, professors: list[str]) -> str:
     ]
 
     for label, attr, fmt in rows:
-        cells = [label] + [_cell(profiles[n], attr, fmt) for n in names]
+        cells = [label] + [_cell(p, attr, fmt) for _, p in pairs]
         lines.append("| " + " | ".join(cells) + " |")
 
     lines.extend(["", "## Top Tags"])
 
-    for name, prof in profiles.items():
+    for name, prof in pairs:
         if prof and prof.tags:
             lines.append(f"### {prof.first_name} {prof.last_name}")
             for tag, count in prof.tags[:6]:
