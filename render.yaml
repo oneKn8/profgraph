@@ -1,0 +1,19 @@
+services:
+  - type: web
+    runtime: docker
+    name: profgraph
+    repo: https://github.com/oneKn8/profgraph
+    region: dallas
+    plan: free
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: PROFGRAPH_TRANSPORT
+        value: streamable-http
+      - key: PROFGRAPH_HOST
+        value: 0.0.0.0
+      - key: PROFGRAPH_PORT
+        value: "8000"
+    disk:
+      name: profgraph-data
+      mountPath: /app/data
+      sizeGB: 1
