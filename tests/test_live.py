@@ -1,9 +1,18 @@
-"""Live API tests for ProfGraph tools."""
+"""Live API tests for ProfGraph tools.
+
+These hit live external APIs (RateMyProfessors, Nebula Trends) and are marked
+`live`, so they are deselected by default. Run them with `pytest -m live`
+(network permitting), or directly as a script: `python tests/test_live.py`.
+"""
 
 import asyncio
 import sys
 
+import pytest
+
 from profgraph.cache import TTLCache
+
+pytestmark = pytest.mark.live
 
 _cache = TTLCache()
 
@@ -22,12 +31,16 @@ async def test_search():
     return jason.rmp_id
 
 
-async def test_profile(rmp_id: str):
+async def test_profile(rmp_id: str | None = None):
     from profgraph.rmp import RMPClient
-    
 
     cache = _cache
     client = RMPClient(cache)
+    if rmp_id is None:
+        # Discover an id when run standalone under pytest (the script passes one).
+        results = await client.search("utd", "Jason Smith")
+        assert len(results) > 0, "No results for Jason Smith"
+        rmp_id = results[0].rmp_id
     prof = await client.profile(rmp_id)
     assert prof.first_name == "Jason"
     assert len(prof.tags) > 0, "No tags"
