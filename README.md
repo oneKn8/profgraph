@@ -147,6 +147,11 @@ Rating: 3.3/5 | Difficulty: 4.3/5 | Would Take Again: 55%
 - Amazing lectures (28x)
 ```
 
+> Note: the "Teaching Style Tags" above come from RateMyProfessors' `teacherRatingTags`
+> field, which has degraded upstream and now frequently returns empty. ProfGraph handles
+> this gracefully (the tag list is simply omitted); the NLP-extracted "Teaching Style"
+> section does not depend on it.
+
 ## Data Sources
 
 | Source | Method | Auth |
